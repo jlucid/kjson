@@ -1,6 +1,6 @@
 # KJSON Library for KDB+ Integration
 
-This library provides tools to convert JSON data to KDB+ objects and vice versa, facilitating seamless integration between JSON and KDB+ data. The library uses RapidJSON to parse and serialize JSON and is built to work efficiently with KDB+ native data types.
+This library provides tools to convert JSON data to KDB+ objects and vice versa, facilitating seamless integration between JSON and KDB+ data. The library uses RapidJSON to parse and serialize JSON and is built to work efficiently with KDB+ native data types. The library 
 
 ## Features
 - Convert JSON strings to KDB+ objects.
@@ -37,19 +37,19 @@ This library provides tools to convert JSON data to KDB+ objects and vice versa,
 1. Load the compiled shared library (`kjson.so`) into your KDB+ process:
    ```q
    \ Load the shared library into KDB+
-   system "l kjson.so"
-   ktoj: `libc` (`ktoj; 1)
-   jtok: `libc` (`jtok; 1)
+   libpath:`:kjson  
+   ktoj:libpath 2:(`ktoj;1)
+   jtok:libpath 2:(`jtok;1)
    ```
 2. Example usage in KDB+:
    ```q
-   jsonString: "{"a":1,"b":2}"
-   result: jtok jsonString
+    a:.j.k .j.j (([] sym:`a`b;p:1 2);([] rv:1 2;g:3 4;s:10b))
+    b:jtok ktoj (([] sym:`a`b;p:1 2);([] rv:1 2;g:3 4;s:10b))
+    a~b
+    1b
    ```
 
 ## License
-This project is licensed under the MIT License.
+This project is licensed under the GPL 3.0 License. 
 
-## Contact
-For any questions or contributions, please contact the repository owner at: [your email address]
 
