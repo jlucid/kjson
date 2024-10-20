@@ -1,0 +1,1112 @@
+#include "kjson_serialisation.h"
+#include "kjson_utils.h"
+#include <cmath>
+#include <ctime>
+#include <cstring> // For memcpy, memcmp
+#include <arpa/inet.h> // For ntohl, etc.
+#include <cassert>
+#include <cstdio> // For snprintf
+#include "rapidjson/error/en.h" // For GetParseError_En
+
+namespace kjson {
+
+using GUID = unsigned char[16];
+
+extern "C" {
+    #include "k.h"
+    extern K vk(K);
+}
+
+template<typename Writer>
+void serialise_keyed_table(Writer& w, K keys, K values)
+{
+    const K kdict = keys->k;
+    const K kkeys = kK(kdict)[0];
+    const K kvalues = kK(kdict)[1];
+
+    const K vdict = values->k;
+    const K vkeys = kK(vdict)[0];
+    const K vvalues = kK(vdict)[1];
+
+    const int krows = kK(kvalues)[0]->n;
+    const int vrows = kK(vvalues)[0]->n;
+
+    assert(vrows == krows);
+
+    // Serialize keyed table as an array of objects
+    w.StartArray();
+    for (int row = 0; row < krows; row++)
+    {
+        w.StartObject();
+        for (int col = 0; col < kkeys->n; col++)
+        {
+            serialise_atom(w, kkeys, col);
+            serialise_atom(w, kK(kvalues)[col], row);
+        }
+        for (int col = 0; col < vkeys->n; col++)
+        {
+            serialise_atom(w, vkeys, col);
+            serialise_atom(w, kK(vvalues)[col], row);
+        }
+        w.EndObject();
+    }
+    w.EndArray();
+}
+
+
+
+template<typename Writer>
+void serialise_sym(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            w.String(kS(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                w.String(kS(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        w.String(x->s);
+    }
+}
+
+template<typename Writer>
+void emit_enum_sym(Writer& w, K sym, int sym_idx)
+{
+    switch (sym_idx)
+    {
+        case wi:
+        case ni:
+            w.Null();
+            break;
+        default:
+            w.String(kS(sym)[sym_idx]);
+    }
+}
+
+
+template<typename Writer>
+void serialise_enum_sym(Writer& w, K x, bool isvec, int i)
+{
+    // Convert symbol to string using ss function
+    if (x->t != 20) {
+        w.Null();
+        return;
+    }
+
+    // Assuming that x is the enum in KDB
+    if (isvec) {
+        if (i >= 0) {
+            w.String(kS(x)[i]);
+        } else {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; ++idx) {
+                w.String(kS(x)[idx]);
+            }
+            w.EndArray();
+        }
+    } else {
+        w.String(x->s);
+    }
+}
+
+
+template<typename Writer>
+void serialise_char(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i == -1)
+        {
+            w.String((char*)kC(x), x->n);
+        }
+        else
+        {
+            w.String((char*)&kC(x)[i], 1);
+        }
+    }
+    else
+    {
+        w.String((char*)&x->g, 1);
+    }
+}
+
+template<typename Writer>
+void serialise_bool(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            w.Bool(kG(x)[i] != 0);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                w.Bool(kG(x)[idx] != 0);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        w.Bool(x->g != 0);
+    }
+}
+
+template<typename Writer>
+inline void emit_byte(Writer& w, unsigned char n)
+{
+    const char* hex = "0123456789abcdef";
+    char buff[3]; // Two hex digits + null terminator
+
+    buff[0] = hex[(n >> 4) & 0xF];
+    buff[1] = hex[n & 0xF];
+    buff[2] = '\0';
+
+    w.String(buff, 2);
+}
+
+template<typename Writer>
+void serialise_byte(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_byte(w, kG(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_byte(w, kG(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_byte(w, x->g);
+    }
+}
+
+template<typename Writer>
+inline void emit_short(Writer& w, int n)
+{
+    switch (n)
+    {
+        case wh:
+        case nh:
+            w.Null();
+            break;
+        default:
+            w.Int(n);
+            break;
+    }
+}
+
+template<typename Writer>
+void serialise_short(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_short(w, kH(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_short(w, kH(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_short(w, x->h);
+    }
+}
+
+template<typename Writer>
+inline void emit_int(Writer& w, int n)
+{
+    switch (n)
+    {
+        case wi:
+        case ni:
+            w.Null();
+            break;
+        default:
+            w.Int(n);
+            break;
+    }
+}
+
+template<typename Writer>
+void serialise_int(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_int(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_int(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_int(w, x->i);
+    }
+}
+
+template<typename Writer>
+inline void emit_long(Writer& w, long long n)
+{
+    switch (n)
+    {
+        case wj:
+        case nj:
+            w.Null();
+            break;
+        default:
+            w.Int64(n);
+            break;
+    }
+}
+
+template<typename Writer>
+void serialise_long(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_long(w, kJ(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_long(w, kJ(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_long(w, x->j);
+    }
+}
+
+template<typename Writer>
+inline void emit_double(Writer& w, double n)
+{
+    if (std::isnan(n))
+    {
+        w.Null();
+    }
+    else if (std::isinf(n))
+    {
+        w.String(n == INFINITY ? "Inf" : "-Inf");
+    }
+    else
+    {
+        w.Double(n);
+    }
+}
+
+template<typename Writer>
+void serialise_float(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_double(w, kE(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_double(w, kE(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_double(w, x->e);
+    }
+}
+
+template<typename Writer>
+inline void emit_double_custom(Writer& w, double n)
+{
+    if (std::isnan(n))
+    {
+        w.Null();
+    }
+    else if (std::isinf(n))
+    {
+        w.String(n == INFINITY ? "Inf" : "-Inf");
+    }
+    else
+    {
+        double intpart;
+        if (std::modf(n, &intpart) == 0.0)
+        {
+            // Value is an integer
+            if (n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max())
+            {
+                w.Int(static_cast<int>(n));
+            }
+            else if (n >= std::numeric_limits<int64_t>::min() && n <= std::numeric_limits<int64_t>::max())
+            {
+                w.Int64(static_cast<int64_t>(n));
+            }
+            else
+            {
+                w.Double(n);
+            }
+        }
+        else
+        {
+            w.Double(n);
+        }
+    }
+}
+
+template<typename Writer>
+void serialise_double(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_double_custom(w, kF(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_double_custom(w, kF(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_double_custom(w, x->f);
+    }
+}
+
+template<typename Writer>
+inline void emit_date_custom(Writer& w, int n)
+{
+    if (n == ni)
+    {
+        w.Null();
+    }
+    else
+    {
+        time_t tt = (n + 10957) * 86400; // Convert to seconds since epoch
+        struct tm timinfo;
+        gmtime_r(&tt, &timinfo);
+        char buff[11]; // YYYY-MM-DD\0
+        snprintf(buff, sizeof(buff), "%04d-%02d-%02d", timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday);
+        w.String(buff, 10);
+    }
+}
+
+template<typename Writer>
+void serialise_date(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_date_custom(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_date_custom(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_date_custom(w, x->i);
+    }
+}
+
+template<typename Writer>
+inline void emit_time_custom(Writer& w, int n)
+{
+    if (n == ni)
+    {
+        w.Null();
+    }
+    else
+    {
+        int millis = n % 1000;
+        int total_seconds = n / 1000;
+        int hours = total_seconds / 3600;
+        int minutes = (total_seconds % 3600) / 60;
+        int seconds = total_seconds % 60;
+        char buff[13]; // HH:MM:SS.mmm\0
+        snprintf(buff, sizeof(buff), "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis);
+        w.String(buff, 12);
+    }
+}
+
+template<typename Writer>
+void serialise_time(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_time_custom(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_time_custom(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_time_custom(w, x->i);
+    }
+}
+
+
+
+template<typename Writer>
+inline void emit_timestamp_custom(Writer& w, long long n)
+{
+    if (n == nj)
+    {
+        w.Null();
+    }
+    else
+    {
+        // Convert nanoseconds since 2000-01-01 to seconds since UNIX epoch
+        constexpr long long SEC_IN_DAY = 86400LL;
+        constexpr long long NANOS_IN_SEC = 1000000000LL;
+
+        // Number of days from 1970-01-01 to 2000-01-01
+        constexpr long long DAYS_1970_TO_2000 = 10957LL;
+
+        // Calculate seconds and nanoseconds
+        long long total_seconds = n / NANOS_IN_SEC;
+        long long nanoseconds = n % NANOS_IN_SEC;
+
+        // Adjust for the epoch difference
+        total_seconds += DAYS_1970_TO_2000 * SEC_IN_DAY;
+
+        // Convert to time structure
+        time_t tt = static_cast<time_t>(total_seconds);
+        struct tm timinfo;
+        gmtime_r(&tt, &timinfo);
+
+        // Format the string
+        char buff[30]; // YYYY-MM-DDTHH:MM:SS.nnnnnnnnn
+        snprintf(buff, sizeof(buff), "%04d-%02d-%02dT%02d:%02d:%02d.%09lld",
+                 timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
+                 timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, nanoseconds);
+        
+        // Write to the writer
+        w.String(buff, strlen(buff));
+    }
+}
+
+
+template<typename Writer>
+void serialise_timestamp(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_timestamp_custom(w, kJ(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_timestamp_custom(w, kJ(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_timestamp_custom(w, x->j);
+    }
+}
+
+template<typename Writer>
+inline void emit_timespan_custom(Writer& w, long long n)
+{
+    if (n == nj)
+    {
+        w.Null();
+    }
+    else
+    {
+        // Convert nanoseconds to days, hours, minutes, seconds, and nanoseconds
+        constexpr long long NANOS_IN_SEC = 1000000000LL;
+        constexpr long long SECS_IN_MIN = 60LL;
+        constexpr long long MINS_IN_HOUR = 60LL;
+        constexpr long long HOURS_IN_DAY = 24LL;
+
+        long long total_seconds = n / NANOS_IN_SEC;
+        long long nanoseconds = n % NANOS_IN_SEC;
+
+        // Determine sign of the timespan
+        bool is_negative = false;
+        if (n < 0)
+        {
+            is_negative = true;
+            total_seconds = -total_seconds;
+            nanoseconds = -nanoseconds;
+        }
+
+        // Calculate days, hours, minutes, and seconds
+        long long days = total_seconds / (HOURS_IN_DAY * MINS_IN_HOUR * SECS_IN_MIN);
+        long long remaining_seconds = total_seconds % (HOURS_IN_DAY * MINS_IN_HOUR * SECS_IN_MIN);
+        long long hours = remaining_seconds / (MINS_IN_HOUR * SECS_IN_MIN);
+        remaining_seconds %= (MINS_IN_HOUR * SECS_IN_MIN);
+        long long minutes = remaining_seconds / SECS_IN_MIN;
+        long long seconds = remaining_seconds % SECS_IN_MIN;
+
+        // Format the string as "0D01:02:03.456789123"
+        char buff[32]; // Enough space for the string representation
+        snprintf(buff, sizeof(buff),
+                 "%s%lldD%02lld:%02lld:%02lld.%09lld",
+                 is_negative ? "-" : "", days, hours, minutes, seconds, nanoseconds);
+
+        // Write to the writer
+        w.String(buff, strlen(buff));
+    }
+}
+
+
+
+template<typename Writer>
+void serialise_timespan(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_timespan_custom(w, kJ(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_timespan_custom(w, kJ(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_timespan_custom(w, x->j);
+    }
+}
+
+template<typename Writer>
+inline void emit_datetime_custom(Writer& w, double n)
+{
+    if (std::isnan(n))
+    {
+        w.Null();
+    }
+    else
+    {
+        time_t tt = static_cast<time_t>((n + 10957) * 86400);
+        struct tm timinfo;
+        gmtime_r(&tt, &timinfo);
+        long millis = static_cast<long>((n - floor(n)) * 86400000) % 1000;
+        char buff[24]; // YYYY-MM-DDTHH:MM:SS.mmm\0
+        snprintf(buff, sizeof(buff),
+                 "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+                 timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
+                 timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, millis);
+        w.String(buff, 23);
+    }
+}
+
+template<typename Writer>
+void serialise_datetime(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_datetime_custom(w, kF(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_datetime_custom(w, kF(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_datetime_custom(w, x->f);
+    }
+}
+
+template<typename Writer>
+inline void emit_month_custom(Writer& w, const int n)
+{
+    if (n == ni)
+    {
+        w.Null();
+    }
+    else
+    {
+        int year = n / 12 + 2000;
+        int month = n % 12 + 1;
+        char buff[8]; // YYYY-MM\0
+        snprintf(buff, sizeof(buff), "%04d-%02d", year, month);
+        w.String(buff, 7);
+    }
+}
+
+template<typename Writer>
+void serialise_month(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_month_custom(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_month_custom(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_month_custom(w, x->i);
+    }
+}
+
+template<typename Writer>
+inline void emit_minute_custom(Writer& w, const int n)
+{
+    if (n == ni)
+    {
+        w.Null();
+    }
+    else
+    {
+        int hours = n / 60;
+        int minutes = n % 60;
+        char buff[6]; // HH:MM\0
+        snprintf(buff, sizeof(buff), "%02d:%02d", hours, minutes);
+        w.String(buff, 5);
+    }
+}
+
+template<typename Writer>
+void serialise_minute(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_minute_custom(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_minute_custom(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_minute_custom(w, x->i);
+    }
+}
+
+template<typename Writer>
+inline void emit_second_custom(Writer& w, const int n)
+{
+    if (n == ni)
+    {
+        w.Null();
+    }
+    else
+    {
+        int hours = n / 3600;
+        int minutes = (n % 3600) / 60;
+        int seconds = n % 60;
+        char buff[9]; // HH:MM:SS\0
+        snprintf(buff, sizeof(buff), "%02d:%02d:%02d", hours, minutes, seconds);
+        w.String(buff, 8);
+    }
+}
+
+template<typename Writer>
+void serialise_second(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_second_custom(w, kI(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_second_custom(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_second_custom(w, x->i);
+    }
+}
+
+template<typename Writer>
+inline void emit_guid_custom(Writer& w, const U guid_raw)
+{
+    static const U null_guid = {0};
+
+    if (memcmp(&guid_raw, &null_guid, sizeof(U)) == 0)
+    {
+        w.Null();
+    }
+    else
+    {
+        union {
+            struct {
+                uint32_t data1;
+                uint16_t data2;
+                uint16_t data3;
+                uint16_t data4;
+                uint16_t data5;
+                uint32_t data6;
+            };
+            U raw;
+        } guid;
+
+        guid.raw = guid_raw;
+        char buff[37]; // 8-4-4-4-12\0
+        snprintf(buff, sizeof(buff), "%08x-%04x-%04x-%04x-%04x%08x",
+                 ntohl(guid.data1), ntohs(guid.data2), ntohs(guid.data3), ntohs(guid.data4),
+                 ntohs(guid.data5), ntohl(guid.data6));
+        w.String(buff, 36);
+    }
+}
+
+template<typename Writer>
+void serialise_guid(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_guid_custom(w, kU(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                emit_guid_custom(w, kU(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_guid_custom(w, kU(x)[0]);
+    }
+}
+
+template<typename Writer>
+void serialise_dict(Writer& w, K x, bool isvec, int i)
+{
+    const K keys = kK(x)[0];
+    const K values = kK(x)[1];
+
+    if (keys->t == XT && values->t == XT)
+    {
+        serialise_keyed_table(w, keys, values);
+    }
+    else
+    {
+        w.StartObject();
+        for (int idx = 0; idx < keys->n; idx++)
+        {
+            serialise_atom(w, keys, idx);
+            serialise_atom(w, values, idx);
+        }
+        w.EndObject();
+    }
+}
+
+
+
+template<typename Writer>
+void serialise_list(Writer& w, K x, bool isvec, int i)
+{
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            K v = kK(x)[i];
+            serialise_atom(w, v);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; idx++)
+            {
+                K v = kK(x)[idx];
+                serialise_atom(w, v);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        w.Null();
+    }
+}
+
+
+
+template<typename Writer>
+void serialise_table(Writer& w, K x, bool isvec, int i)
+{
+    const K dict = x->k;
+    const K keys = kK(dict)[0];
+    const K values = kK(dict)[1];
+
+    if (i >= 0)
+    {
+        w.StartObject();
+        for (int col = 0; col < keys->n; col++)
+        {
+            serialise_atom(w, keys, col);
+            serialise_atom(w, kK(values)[col], i);
+        }
+        w.EndObject();
+    }
+    else
+    {
+        const int rows = kK(values)[0]->n;
+
+        w.StartArray();
+        for (int row = 0; row < rows; row++)
+        {
+            w.StartObject();
+            for (int col = 0; col < keys->n; col++)
+            {
+                serialise_atom(w, keys, col);
+                serialise_atom(w, kK(values)[col], row);
+            }
+            w.EndObject();
+        }
+        w.EndArray();
+    }
+}
+
+
+// Template function to serialize K objects (atoms, lists, dictionaries, etc.)
+template<typename Writer>
+void serialise_atom(Writer& w, const K x, int i)
+{
+    bool isvec = x->t >= 0;
+
+    switch (x->t)
+    {
+        case 0:
+            serialise_list(w, x, isvec, i);
+            break;
+        case KS:
+        case -KS:
+            serialise_sym(w, x, isvec, i);
+            break;
+        case KC:
+        case -KC:
+            serialise_char(w, x, isvec, i);
+            break;
+        case KB:
+        case -KB:
+            serialise_bool(w, x, isvec, i);
+            break;
+        case KG:
+        case -KG:
+            serialise_byte(w, x, isvec, i);
+            break;
+        case KH:
+        case -KH:
+            serialise_short(w, x, isvec, i);
+            break;
+        case KI:
+        case -KI:
+            serialise_int(w, x, isvec, i);
+            break;
+        case KT:
+        case -KT:
+            serialise_time(w, x, isvec, i);
+            break;
+        case KN:
+        case -KN:
+            serialise_timespan(w, x, isvec, i);
+            break;
+        case KP:
+        case -KP:
+            serialise_timestamp(w, x, isvec, i);
+            break;
+        case KD:
+        case -KD:
+            serialise_date(w, x, isvec, i);
+            break;
+        case KJ:
+        case -KJ:
+            serialise_long(w, x, isvec, i);
+            break;
+        case UU:
+        case -UU:
+            serialise_guid(w, x, isvec, i);
+            break;
+        case KE:
+        case -KE:
+            serialise_float(w, x, isvec, i);
+            break;
+        case KF:
+        case -KF:
+            serialise_double(w, x, isvec, i);
+            break;
+        case XT:
+            serialise_table(w, x, isvec, i);
+            break;
+        case XD:
+            serialise_dict(w, x, isvec, i);
+            break;
+        default:
+            w.Null();
+            break;
+    }
+}
+
+// C++ template specialization to explicitly instantiate serialization for rapidjson::Writer
+// You can implement functions like serialise_list, serialise_dict, etc., below, similar to the full code provided earlier.
+// All functions are fully specialized for rapidjson::Writer
+
+
+
+} // namespace kjson
+
+
+
+extern "C" {
+
+// KDB+ interface function: JSON to K (General)
+K __attribute__((visibility("default"))) jtok(K json_string)
+{
+    if (json_string->t != KC)
+    {
+        return krr((S)"Type error: Input must be a char vector (string)");
+    }
+
+    // Parse the JSON string
+    rapidjson::Document document;
+    document.Parse((const char*)kC(json_string), json_string->n);
+
+    if (document.HasParseError())
+    {
+        std::string errMsg = std::string("Parse error: ") + GetParseError_En(document.GetParseError()) +
+                             " at offset " + std::to_string(document.GetErrorOffset());
+        return krr((S)errMsg.c_str());
+    }
+
+    // Convert JSON value to K object
+    K result = kjson::json_to_kobject(document);
+
+    return result;
+}
+
+// KDB+ interface function: K object to JSON
+K __attribute__((visibility("default"))) ktoj(K x)
+{
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+
+    writer.SetMaxDecimalPlaces(5); // Set maximum to 5 decimal places
+
+    kjson::serialise_atom(writer, x); // Serialize the K object
+
+    // Marshal to KDB+
+    K ser = kp((S)buffer.GetString());
+
+    return ser;
+}
+
+} // extern "C"
