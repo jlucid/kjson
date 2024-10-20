@@ -1,6 +1,7 @@
 / Load your functions
-ktoj:`:kjson 2:(`ktoj;1)
-jtok:`:kjson 2:(`jtok;1)
+libpath:`:kjson
+ktoj:libpath 2:(`ktoj;1)
+jtok:libpath 2:(`jtok;1)
 
 / Initialize the lists as general lists
 objects:enlist  ()      / empty general list
