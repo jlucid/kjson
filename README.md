@@ -2,6 +2,8 @@
 
 This library provides tools to convert JSON data to KDB+ objects and vice versa, facilitating seamless integration between JSON and KDB+ data. The library uses RapidJSON to parse and serialize JSON and is built to work efficiently with KDB+ native data types. The library took as a starting point the qrapidjson library which provided a means of converting K objects to JSON. 
 This implementation was built using chatGPT o1-preview. It has been tested against the K objects given in the unittests.q file. 
+In terms of performance, tests show the converters to be 2-4x faster than native .j.j and .j.k functions. 
+
 
 ## Features
 - Convert JSON strings to KDB+ objects.
