@@ -24,8 +24,8 @@ In terms of performance, tests show the converters to be 2-4x faster than native
 ## Building the Library
 1. Clone the repository:
    ```sh
-   git clone <repository_url>
-   cd <repository_folder>
+   git clone https://github.com/jlucid/kjson.git
+   cd kjson
    ```
 2. Compile the shared library using the provided Makefile:
    ```sh
