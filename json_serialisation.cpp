@@ -53,8 +53,6 @@ void serialise_keyed_table(Writer& w, K keys, K values)
     w.EndArray();
 }
 
-
-
 template<typename Writer>
 void serialise_sym(Writer& w, K x, bool isvec, int i)
 {
@@ -94,7 +92,6 @@ void emit_enum_sym(Writer& w, K sym, int sym_idx)
     }
 }
 
-
 template<typename Writer>
 void serialise_enum_sym(Writer& w, K x, bool isvec, int i)
 {
@@ -119,7 +116,6 @@ void serialise_enum_sym(Writer& w, K x, bool isvec, int i)
         w.String(x->s);
     }
 }
-
 
 template<typename Writer>
 void serialise_char(Writer& w, K x, bool isvec, int i)
@@ -327,17 +323,41 @@ void serialise_long(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_double(Writer& w, double n)
 {
+
+    static const char* INF_STR = "Inf";
+    static const char* NINF_STR = "-Inf";
+
     if (std::isnan(n))
     {
         w.Null();
     }
     else if (std::isinf(n))
     {
-        w.String(n == INFINITY ? "Inf" : "-Inf");
+        w.String(n == INFINITY ? INF_STR : NINF_STR);
     }
     else
     {
-        w.Double(n);
+        double intpart;
+        if (std::modf(n, &intpart) == 0.0)
+        {
+            // Value is an integer
+            if (n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max())
+            {
+                w.Int(static_cast<int>(n));
+            }
+            else if (n >= std::numeric_limits<int64_t>::min() && n <= std::numeric_limits<int64_t>::max())
+            {
+                w.Int64(static_cast<int64_t>(n));
+            }
+            else
+            {
+                w.Double(n);
+            }
+        }
+        else
+        {
+            w.Double(n);
+        }
     }
 }
 
@@ -367,64 +387,27 @@ void serialise_float(Writer& w, K x, bool isvec, int i)
 }
 
 template<typename Writer>
-inline void emit_double_custom(Writer& w, double n)
-{
-    if (std::isnan(n))
-    {
-        w.Null();
-    }
-    else if (std::isinf(n))
-    {
-        w.String(n == INFINITY ? "Inf" : "-Inf");
-    }
-    else
-    {
-        double intpart;
-        if (std::modf(n, &intpart) == 0.0)
-        {
-            // Value is an integer
-            if (n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max())
-            {
-                w.Int(static_cast<int>(n));
-            }
-            else if (n >= std::numeric_limits<int64_t>::min() && n <= std::numeric_limits<int64_t>::max())
-            {
-                w.Int64(static_cast<int64_t>(n));
-            }
-            else
-            {
-                w.Double(n);
-            }
-        }
-        else
-        {
-            w.Double(n);
-        }
-    }
-}
-
-template<typename Writer>
 void serialise_double(Writer& w, K x, bool isvec, int i)
 {
     if (isvec)
     {
         if (i >= 0)
         {
-            emit_double_custom(w, kF(x)[i]);
+            emit_double(w, kF(x)[i]);
         }
         else
         {
             w.StartArray();
             for (int idx = 0; idx < x->n; idx++)
             {
-                emit_double_custom(w, kF(x)[idx]);
+                emit_double(w, kF(x)[idx]);
             }
             w.EndArray();
         }
     }
     else
     {
-        emit_double_custom(w, x->f);
+        emit_double(w, x->f);
     }
 }
 
@@ -516,8 +499,6 @@ void serialise_time(Writer& w, K x, bool isvec, int i)
     }
 }
 
-
-
 template<typename Writer>
 inline void emit_timestamp_custom(Writer& w, long long n)
 {
@@ -556,7 +537,6 @@ inline void emit_timestamp_custom(Writer& w, long long n)
         w.String(buff, strlen(buff));
     }
 }
-
 
 template<typename Writer>
 void serialise_timestamp(Writer& w, K x, bool isvec, int i)
@@ -628,8 +608,6 @@ inline void emit_timespan_custom(Writer& w, long long n)
         w.String(buff, strlen(buff));
     }
 }
-
-
 
 template<typename Writer>
 void serialise_timespan(Writer& w, K x, bool isvec, int i)
@@ -909,8 +887,6 @@ void serialise_dict(Writer& w, K x, bool isvec, int i)
     }
 }
 
-
-
 template<typename Writer>
 void serialise_list(Writer& w, K x, bool isvec, int i)
 {
@@ -937,8 +913,6 @@ void serialise_list(Writer& w, K x, bool isvec, int i)
         w.Null();
     }
 }
-
-
 
 template<typename Writer>
 void serialise_table(Writer& w, K x, bool isvec, int i)
@@ -975,7 +949,6 @@ void serialise_table(Writer& w, K x, bool isvec, int i)
         w.EndArray();
     }
 }
-
 
 // Template function to serialize K objects (atoms, lists, dictionaries, etc.)
 template<typename Writer>
@@ -1056,23 +1029,21 @@ void serialise_atom(Writer& w, const K x, int i)
     }
 }
 
-// C++ template specialization to explicitly instantiate serialization for rapidjson::Writer
-// You can implement functions like serialise_list, serialise_dict, etc., below, similar to the full code provided earlier.
-// All functions are fully specialized for rapidjson::Writer
-
-
 
 } // namespace kjson
 
-
-
 extern "C" {
 
+// Helper function to handle parsing errors
+K handle_parse_error(const rapidjson::Document& document) {
+    std::string errMsg = std::string("Parse error: ") + GetParseError_En(document.GetParseError()) +
+                         " at offset " + std::to_string(document.GetErrorOffset());
+    return krr((S)errMsg.c_str());
+}
+
 // KDB+ interface function: JSON to K (General)
-K __attribute__((visibility("default"))) jtok(K json_string)
-{
-    if (json_string->t != KC)
-    {
+K jtok(K json_string) {
+    if (json_string->t != KC) {
         return krr((S)"Type error: Input must be a char vector (string)");
     }
 
@@ -1080,22 +1051,16 @@ K __attribute__((visibility("default"))) jtok(K json_string)
     rapidjson::Document document;
     document.Parse((const char*)kC(json_string), json_string->n);
 
-    if (document.HasParseError())
-    {
-        std::string errMsg = std::string("Parse error: ") + GetParseError_En(document.GetParseError()) +
-                             " at offset " + std::to_string(document.GetErrorOffset());
-        return krr((S)errMsg.c_str());
+    if (document.HasParseError()) {
+        return handle_parse_error(document);
     }
 
     // Convert JSON value to K object
-    K result = kjson::json_to_kobject(document);
-
-    return result;
+    return kjson::json_to_kobject(document);
 }
 
 // KDB+ interface function: K object to JSON
-K __attribute__((visibility("default"))) ktoj(K x)
-{
+K ktoj(K x) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
 
@@ -1104,9 +1069,7 @@ K __attribute__((visibility("default"))) ktoj(K x)
     kjson::serialise_atom(writer, x); // Serialize the K object
 
     // Marshal to KDB+
-    K ser = kp((S)buffer.GetString());
-
-    return ser;
+    return kp((S)buffer.GetString());
 }
 
 } // extern "C"
