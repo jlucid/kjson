@@ -31,7 +31,8 @@ objects,:enlist  `a`b!(10.0;20.01);                description,:  "Dictionary wi
 objects,:enlist  `a`b!(0b;1b);                     description,:  "Booleans"
 objects,:enlist  `a`b`c!(1;2;3);                   description,:  "Simple Dictionary"
 objects,:enlist  `int`float`bool!(42;3.14;1b);     description,:  "Dictionary with Mixed Types"
-objects,:enlist  `nums`letters!(1 2 3;"abc");      description,:  "Dictionary with Lists"
+objects,:enlist  `nums`letters!(1 2 3;"abc");      description,:  "Dictionary with Lists 1"
+objects,:enlist  `a`b`c!((1;2;3);12345;("as";"hj")); description,: "Dictionary with Lists 2"
 
 / Tables
 objects,:enlist  ([] a:1 2 3; b:"abc");            description,:  "Simple Table"
