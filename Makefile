@@ -15,8 +15,8 @@ all: $(TARGET)
 
 # Build shared library
 $(TARGET): $(SOURCES)
-        $(CXX) $(CXXFLAGS) $(SOURCES) -o $(TARGET) -shared
+	$(CXX) $(CXXFLAGS) $(SOURCES) -o $(TARGET) -shared
 
 # Clean target
 clean:
-        rm -f $(TARGET)
+	rm -f $(TARGET)
