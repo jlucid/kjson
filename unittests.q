@@ -10,6 +10,7 @@ description:enlist ()  / empty general list
 / Simple Atoms
 objects,:  42;                               description,:  "Integer Atom"
 objects,:  3.14159;                          description,:  "Float Atom"
+objects,:  3.0;                              description,:  "Float Atom, drop decimals if .0"
 objects,:  1b;                               description,:  "Boolean Atom"
 objects,:  "q";                              description,:  "Char Atom"
 objects,:  `hello;                           description,:  "Symbol Atom"
