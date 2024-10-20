@@ -47,6 +47,11 @@ objects,:  0N;                               description,:  "Null Value"
 
 / Timespan
 objects,:  0D15:00:31.539282370;               description,:  "Timespan Atom"
+
+/  Infinity - This is a known failure, will not be identical
+// objects,:-0w 0 1 2 3 0w;                      description,:"List containing plus and minus infinity"
+
+
 ktojCheck:{[x;y]
   $[(ktoj x)~.j.j x; show "K to JSON - Passed: ", y;[show "Failed: ", y;0N! (.j.j x;ktoj x)]]
  }
