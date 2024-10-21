@@ -4,8 +4,7 @@ ktoj:libpath 2:(`ktoj;1)
 jtok:libpath 2:(`jtok;1)
 
 / Initialize the lists as general lists
-objects:enlist  ()      / empty general list
-description:enlist ()  / empty general list
+objects:enlist  ();                          description:enlist "Empty list"
 
 / Simple Atoms
 objects,:  42;                               description,:  "Integer Atom"
@@ -60,9 +59,6 @@ ktojCheck:{[x;y]
 jtokCheck:{[x;y]
   $[(jtok ktoj x)~.j.k .j.j x; show "JSON to K - Passed: ", y;[show "Failed: ", y;0N! (.j.k .j.j x;jtok ktoj x)]]
  }
-
-objects:1 _ objects
-description:1 _ description
 
 ktojCheck[;]'[objects; description]
 jtokCheck[;]'[objects; description]
