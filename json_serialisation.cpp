@@ -60,14 +60,14 @@ void serialise_sym(Writer& w, K x, bool isvec, int i)
     {
         if (i >= 0)
         {
-            w.String(kS(x)[i]);
+            w.String((char*)kS(x)[i]);
         }
         else
         {
             w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
+            for (int i = 0; i < x->n; i++)
             {
-                w.String(kS(x)[idx]);
+                w.String((char*)kS(x)[i]);
             }
             w.EndArray();
         }
@@ -83,37 +83,48 @@ void emit_enum_sym(Writer& w, K sym, int sym_idx)
 {
     switch (sym_idx)
     {
-        case wi:
-        case ni:
-            w.Null();
+        case(wi):
+        case(ni):   
+            w.Null(); 
             break;
-        default:
-            w.String(kS(sym)[sym_idx]);
+        default:    
+            w.String((char*)kS(sym)[sym_idx]);  // Retrieve symbol from global sym
     }
 }
 
 template<typename Writer>
 void serialise_enum_sym(Writer& w, K x, bool isvec, int i)
 {
-    // Convert symbol to string using ss function
-    if (x->t != 20) {
+    // Dynamically retrieve the global `sym` domain
+    K sym = k(0, (S)"sym", (K)0);
+    if (!sym || sym->t != KS)  // Ensure sym is a valid symbol list
+    {
         w.Null();
         return;
     }
 
-    // Assuming that x is the enum in KDB
-    if (isvec) {
-        if (i >= 0) {
-            w.String(kS(x)[i]);
-        } else {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; ++idx) {
-                w.String(kS(x)[idx]);
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            // Access symbol using the correct index from x
+            emit_enum_sym(w, sym, kJ(x)[i]);  // Use kJ(x) for enumerations
+        }
+        else
+        {
+            w.StartArray();  // Serialize the entire array
+            for (int idx = 0; idx < x->n; ++idx)
+            {
+                // Correctly access the symbol based on the enumerated index
+                emit_enum_sym(w, sym, kJ(x)[idx]);  // Use kJ(x) for correct ordering
             }
             w.EndArray();
         }
-    } else {
-        w.String(x->s);
+    }
+    else
+    {
+        // Handle scalar enumerated symbol
+        emit_enum_sym(w, sym, x->j);  // Use x->j for scalar access
     }
 }
 
@@ -576,7 +587,6 @@ inline void emit_timestamp_custom(Writer& w, long long n)
     }
 }
 
-
 template<typename Writer>
 void serialise_timestamp(Writer& w, K x, bool isvec, int i)
 {
@@ -676,22 +686,38 @@ void serialise_timespan(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_datetime_custom(Writer& w, double n)
 {
-    if (std::isnan(n))
+    if (std::isnan(n)) // Handle NaN (missing value)
     {
         w.Null();
     }
     else
     {
+        // Convert days since 2000-01-01 to seconds since UNIX epoch
         time_t tt = static_cast<time_t>((n + 10957) * 86400);
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
-        long millis = static_cast<long>((n - floor(n)) * 86400000) % 1000;
-        char buff[24]; // YYYY-MM-DDTHH:MM:SS.mmm\0
-        snprintf(buff, sizeof(buff),
-                 "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
-                 timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
-                 timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, millis);
-        w.String(buff, 23);
+
+        // Calculate and round milliseconds
+        long millis = static_cast<long>(round((n - floor(n)) * 86400000)) % 1000;
+
+        // Buffer large enough for full datetime string
+        char buff[30]; // YYYY-MM-DDTHH:MM:SS.mmm (23 characters + null terminator)
+
+        // Format the datetime string safely
+        int written = snprintf(buff, sizeof(buff),
+                               "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+                               timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
+                               timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, millis);
+
+        // Check for truncation and emit the string
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the correctly formatted datetime
+        }
+        else
+        {
+            w.Null(); // Handle error if truncation or formatting failed
+        }
     }
 }
 
@@ -723,17 +749,31 @@ void serialise_datetime(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_month_custom(Writer& w, const int n)
 {
-    if (n == ni)
+    if (n == ni) // Handle missing value
     {
         w.Null();
     }
     else
     {
+        // Calculate year and month
         int year = n / 12 + 2000;
         int month = n % 12 + 1;
-        char buff[8]; // YYYY-MM\0
-        snprintf(buff, sizeof(buff), "%04d-%02d", year, month);
-        w.String(buff, 7);
+
+        // Buffer large enough for YYYY-MM format
+        char buff[8]; // YYYY-MM (7 characters + null terminator)
+
+        // Safely format the month string
+        int written = snprintf(buff, sizeof(buff), "%04d-%02d", year, month);
+
+        // Check for truncation and emit the string
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the formatted year-month string
+        }
+        else
+        {
+            w.Null(); // Handle error if truncation or formatting failed
+        }
     }
 }
 
@@ -765,17 +805,31 @@ void serialise_month(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_minute_custom(Writer& w, const int n)
 {
-    if (n == ni)
+    if (n == ni) // Handle missing value
     {
         w.Null();
     }
     else
     {
+        // Calculate hours and minutes
         int hours = n / 60;
         int minutes = n % 60;
-        char buff[6]; // HH:MM\0
-        snprintf(buff, sizeof(buff), "%02d:%02d", hours, minutes);
-        w.String(buff, 5);
+
+        // Buffer large enough for HH:MM format
+        char buff[6]; // HH:MM (5 characters + null terminator)
+
+        // Safely format the time string
+        int written = snprintf(buff, sizeof(buff), "%02d:%02d", hours, minutes);
+
+        // Check for truncation and emit the string
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the formatted time string
+        }
+        else
+        {
+            w.Null(); // Handle error if truncation or formatting failed
+        }
     }
 }
 
@@ -807,18 +861,32 @@ void serialise_minute(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_second_custom(Writer& w, const int n)
 {
-    if (n == ni)
+    if (n == ni) // Handle missing value
     {
         w.Null();
     }
     else
     {
+        // Calculate hours, minutes, and seconds
         int hours = n / 3600;
         int minutes = (n % 3600) / 60;
         int seconds = n % 60;
-        char buff[9]; // HH:MM:SS\0
-        snprintf(buff, sizeof(buff), "%02d:%02d:%02d", hours, minutes, seconds);
-        w.String(buff, 8);
+
+        // Buffer large enough for HH:MM:SS format
+        char buff[9]; // HH:MM:SS (8 characters + null terminator)
+
+        // Safely format the time string
+        int written = snprintf(buff, sizeof(buff), "%02d:%02d:%02d", hours, minutes, seconds);
+
+        // Check for truncation and emit the string
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the formatted time string
+        }
+        else
+        {
+            w.Null(); // Handle error if truncation or formatting failed
+        }
     }
 }
 
@@ -1036,6 +1104,10 @@ void serialise_atom(Writer& w, const K x, int i)
         case -KP:
             serialise_timestamp(w, x, isvec, i);
             break;
+        case KZ:
+        case -KZ:
+            serialise_datetime(w, x, isvec, i);
+            break;
         case KD:
         case -KD:
             serialise_date(w, x, isvec, i);
@@ -1052,17 +1124,33 @@ void serialise_atom(Writer& w, const K x, int i)
         case -KE:
             serialise_float(w, x, isvec, i);
             break;
+        case KM:
+        case -KM:
+            serialise_month(w, x, isvec, i);
+            break;
         case KF:
         case -KF:
             serialise_double(w, x, isvec, i);
             break;
-        case XT:
+        case KU:
+        case -KU:
+            serialise_minute(w, x, isvec, i); 
+	        break;
+        case KV:
+        case -KV:
+            serialise_second(w, x, isvec, i); 
+	        break;
+	    case XT:
             serialise_table(w, x, isvec, i);
             break;
         case XD:
             serialise_dict(w, x, isvec, i);
             break;
-        default:
+        case 20:
+        case -20:
+            serialise_enum_sym(w, x, isvec, i); 
+	        break;
+	default:
             w.Null();
             break;
     }
@@ -1099,16 +1187,24 @@ K jtok(K json_string) {
 }
 
 // KDB+ interface function: K object to JSON
-K ktoj(K x) {
+K ktoj(K x)
+{
+    // Use RapidJSON's StringBuffer and Writer for serialization
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
 
-    writer.SetMaxDecimalPlaces(5); // Set maximum to 5 decimal places
+    // Set decimal precision to 5 places (optional)
+    writer.SetMaxDecimalPlaces(5);
 
-    kjson::serialise_atom(writer, x); // Serialize the K object
+    // Serialize the K object
+    kjson::serialise_atom(writer, x);  // Assuming serialise_atom exists in the kjson namespace
 
-    // Marshal to KDB+
-    return kp((S)buffer.GetString());
+    // Get the size of the buffer
+    size_t len = buffer.GetSize();
+    const char* str = buffer.GetString();
+
+    // Marshal to KDB+, passing both the string and its length for safety
+    return kpn((S)str, len);  // Use kpn to ensure proper string length is handled
 }
 
 } // extern "C"
