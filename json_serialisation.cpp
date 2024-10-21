@@ -414,18 +414,35 @@ void serialise_double(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_date_custom(Writer& w, int n)
 {
-    if (n == ni)
+    if (n == ni) // Handle missing values
     {
         w.Null();
     }
     else
     {
-        time_t tt = (n + 10957) * 86400; // Convert to seconds since epoch
+        // Convert `n` to time since epoch and populate `tm` structure
+        time_t tt = (n + 10957) * 86400; // Adjusting the value for KDB+/Q date format
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
-        char buff[11]; // YYYY-MM-DD\0
-        snprintf(buff, sizeof(buff), "%04d-%02d-%02d", timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday);
-        w.String(buff, 10);
+
+        // Buffer large enough for the formatted date (YYYY-MM-DD) and null terminator
+        char buff[12]; // YYYY-MM-DD + \0 -> 11 characters, using 12 for extra safety
+
+        // Use snprintf to safely format the date, ensuring no buffer overflow
+        int written = snprintf(buff, sizeof(buff), "%04d-%02d-%02d",
+                               timinfo.tm_year + 1900,
+                               timinfo.tm_mon + 1,
+                               timinfo.tm_mday);
+
+        // Ensure no truncation occurred and the output is valid
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the formatted date string
+        }
+        else
+        {
+            w.Null(); // Handle error case if formatting failed
+        }
     }
 }
 
@@ -457,20 +474,34 @@ void serialise_date(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_time_custom(Writer& w, int n)
 {
-    if (n == ni)
+    if (n == ni) // Handle missing values
     {
         w.Null();
     }
     else
     {
+        // Calculate hours, minutes, seconds, and milliseconds
         int millis = n % 1000;
         int total_seconds = n / 1000;
         int hours = total_seconds / 3600;
         int minutes = (total_seconds % 3600) / 60;
         int seconds = total_seconds % 60;
-        char buff[13]; // HH:MM:SS.mmm\0
-        snprintf(buff, sizeof(buff), "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis);
-        w.String(buff, 12);
+
+        // Use a buffer large enough for the formatted time string
+        char buff[16]; // HH:MM:SS.mmm\0 (total 12 characters + null terminator)
+
+        // Safely format the time string with snprintf
+        int written = snprintf(buff, sizeof(buff), "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis);
+
+        // Check if snprintf succeeded without truncation
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the correctly formatted time string
+        }
+        else
+        {
+            w.Null(); // Handle error in case of truncation or formatting failure
+        }
     }
 }
 
@@ -502,24 +533,22 @@ void serialise_time(Writer& w, K x, bool isvec, int i)
 template<typename Writer>
 inline void emit_timestamp_custom(Writer& w, long long n)
 {
-    if (n == nj)
+    if (n == nj) // Handle missing values
     {
         w.Null();
     }
     else
     {
-        // Convert nanoseconds since 2000-01-01 to seconds since UNIX epoch
+        // Constants for conversion
         constexpr long long SEC_IN_DAY = 86400LL;
         constexpr long long NANOS_IN_SEC = 1000000000LL;
-
-        // Number of days from 1970-01-01 to 2000-01-01
         constexpr long long DAYS_1970_TO_2000 = 10957LL;
 
         // Calculate seconds and nanoseconds
         long long total_seconds = n / NANOS_IN_SEC;
         long long nanoseconds = n % NANOS_IN_SEC;
 
-        // Adjust for the epoch difference
+        // Adjust for the epoch difference (from 2000-01-01 to 1970-01-01)
         total_seconds += DAYS_1970_TO_2000 * SEC_IN_DAY;
 
         // Convert to time structure
@@ -527,16 +556,26 @@ inline void emit_timestamp_custom(Writer& w, long long n)
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
 
-        // Format the string
-        char buff[30]; // YYYY-MM-DDTHH:MM:SS.nnnnnnnnn
-        snprintf(buff, sizeof(buff), "%04d-%02d-%02dT%02d:%02d:%02d.%09lld",
-                 timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
-                 timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, nanoseconds);
-        
-        // Write to the writer
-        w.String(buff, strlen(buff));
+        // Buffer large enough for the full timestamp string
+        char buff[40]; // YYYY-MM-DDTHH:MM:SS.nnnnnnnnn (29 characters + null terminator)
+
+        // Safely format the timestamp string
+        int written = snprintf(buff, sizeof(buff), "%04d-%02d-%02dT%02d:%02d:%02d.%09lld",
+                               timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
+                               timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, nanoseconds);
+
+        // Check for truncation and emit the formatted string
+        if (written > 0 && written < sizeof(buff))
+        {
+            w.String(buff, written); // Emit the formatted timestamp
+        }
+        else
+        {
+            w.Null(); // Handle error in case of truncation or formatting failure
+        }
     }
 }
+
 
 template<typename Writer>
 void serialise_timestamp(Writer& w, K x, bool isvec, int i)
