@@ -14,7 +14,7 @@ In terms of performance, tests show the converters to be 2-4x faster than native
 ## Requirements
 - **KDB+**: Version 4.1 or higher.
 - **RapidJSON**: Included as a dependency for parsing and serialization.
-- **C++ Compiler**: Requires a C++20-compatible compiler.
+- **C++ Compiler**: Requires a C++11 or higher compatible compiler.
 
 **Note:** While the library has been tested against the K objects given in the unittests.q file, it may still contain bugs or limitations. Users are encouraged to thoroughly test in their specific environments before deploying to production.- Operating System: Linux (tested on Ubuntu)
 
