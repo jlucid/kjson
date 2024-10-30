@@ -2,24 +2,86 @@
 #include "kjson_utils.h"
 #include <cmath>
 #include <ctime>
-#include <cstring> // For memcpy, memcmp
-#include <arpa/inet.h> // For ntohl, etc.
+#include <cstring>  // For memcpy, memcmp
+#include <arpa/inet.h>  // For ntohl, etc.
 #include <cassert>
-#include <cstdio> // For snprintf
-#include "rapidjson/error/en.h" // For GetParseError_En
+#include <cstdio>  // For snprintf
+#include <sstream>  // For std::ostringstream
+#include <string>
+#include <array>
+#include "rapidjson/error/en.h"  // For GetParseError_En
 
 namespace kjson {
-
-using GUID = unsigned char[16];
 
 extern "C" {
     #include "k.h"
     extern K vk(K);
 }
 
-template<typename Writer>
-void serialise_keyed_table(Writer& w, K keys, K values)
+using GUID = std::array<unsigned char, 16>;
+
+// Generic function to serialise vectors
+template<typename Writer, typename T, typename EmitFunction>
+void serialise_vector(Writer& w, K x, bool isvec, int i, EmitFunction emit_func) {
+    if (isvec) {
+        if (i >= 0) {
+            emit_func(w, reinterpret_cast<T*>(x->G0)[i]);
+        } else {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; ++idx) {
+                emit_func(w, reinterpret_cast<T*>(x->G0)[idx]);
+            }
+            w.EndArray();
+        }
+    } else {
+        emit_func(w, *reinterpret_cast<T*>(&x->g));
+    }
+}
+
+template<typename Writer, typename EmitFunction>
+void serialise_vector(Writer& w, K x, bool isvec, int i, EmitFunction emit_func, U*)
 {
+    if (isvec)
+    {
+        if (i >= 0)
+        {
+            emit_func(w, kU(x)[i]);
+        }
+        else
+        {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; ++idx)
+            {
+                emit_func(w, kU(x)[idx]);
+            }
+            w.EndArray();
+        }
+    }
+    else
+    {
+        emit_func(w, kU(x)[0]);
+    }
+}
+
+template<typename Writer, typename EmitFunction>
+void serialise_vector_enum(Writer& w, K x, bool isvec, int i, EmitFunction emit_func) {
+    if (isvec) {
+        if (i >= 0) {
+            emit_func(w, kI(x)[i]);
+        } else {
+            w.StartArray();
+            for (int idx = 0; idx < x->n; ++idx) {
+                emit_func(w, kI(x)[idx]);
+            }
+            w.EndArray();
+        }
+    } else {
+        emit_func(w, x->i);
+    }
+}
+
+template<typename Writer>
+void serialise_keyed_table(Writer& w, K keys, K values) {
     const K kdict = keys->k;
     const K kkeys = kK(kdict)[0];
     const K kvalues = kK(kdict)[1];
@@ -33,18 +95,14 @@ void serialise_keyed_table(Writer& w, K keys, K values)
 
     assert(vrows == krows);
 
-    // Serialize keyed table as an array of objects
     w.StartArray();
-    for (int row = 0; row < krows; row++)
-    {
+    for (int row = 0; row < krows; ++row) {
         w.StartObject();
-        for (int col = 0; col < kkeys->n; col++)
-        {
+        for (int col = 0; col < kkeys->n; ++col) {
             serialise_atom(w, kkeys, col);
             serialise_atom(w, kK(kvalues)[col], row);
         }
-        for (int col = 0; col < vkeys->n; col++)
-        {
+        for (int col = 0; col < vkeys->n; ++col) {
             serialise_atom(w, vkeys, col);
             serialise_atom(w, kK(vvalues)[col], row);
         }
@@ -54,28 +112,20 @@ void serialise_keyed_table(Writer& w, K keys, K values)
 }
 
 template<typename Writer>
-void serialise_sym(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            w.String((char*)kS(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int i = 0; i < x->n; i++)
-            {
-                w.String((char*)kS(x)[i]);
-            }
-            w.EndArray();
-        }
+void emit_sym(Writer& w, S s) {
+    if (s) {
+        w.String(s);
+    } else {
+        w.Null();
     }
-    else
-    {
-        w.String(x->s);
-    }
+}
+
+template<typename Writer>
+void serialise_sym(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, S s) {
+        emit_sym(w, s);
+    };
+    serialise_vector<Writer, S>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
@@ -95,127 +145,80 @@ void emit_enum_sym(Writer& w, K sym, int sym_idx)
 template<typename Writer>
 void serialise_enum_sym(Writer& w, K x, bool isvec, int i)
 {
-    // Dynamically retrieve the global `sym` domain
-    K sym = k(0, (S)"sym", (K)0);
-    if (!sym || sym->t != KS)  // Ensure sym is a valid symbol list
+    K domain = k(0, (S)"sym", (K)0);
+    if (!domain || domain->t != KS)  // Ensure the domain is a symbol list
     {
+        if (domain) r0(domain);
         w.Null();
         return;
     }
 
-    if (isvec)
-    {
-        if (i >= 0)
+    auto emit_func = [&](Writer& w, J idx) {
+        if (idx == nj || idx < 0 || idx >= domain->n)
         {
-            // Access symbol using the correct index from x
-            emit_enum_sym(w, sym, kJ(x)[i]);  // Use kJ(x) for enumerations
+            w.Null();
         }
         else
         {
-            w.StartArray();  // Serialize the entire array
-            for (int idx = 0; idx < x->n; ++idx)
-            {
-                // Correctly access the symbol based on the enumerated index
-                emit_enum_sym(w, sym, kJ(x)[idx]);  // Use kJ(x) for correct ordering
-            }
-            w.EndArray();
+            w.String(kS(domain)[idx]);
         }
-    }
-    else
-    {
-        // Handle scalar enumerated symbol
-        emit_enum_sym(w, sym, x->j);  // Use x->j for scalar access
+    };
+
+    // Use the serialise_vector function with T = J (long)
+    serialise_vector<Writer, J>(w, x, isvec, i, emit_func);
+
+    r0(domain);  // Decrement reference count for domain
+}
+
+template<typename Writer>
+void emit_char(Writer& w, C c) {
+    w.String(&c, 1);
+}
+
+template<typename Writer>
+void serialise_char(Writer& w, K x, bool isvec, int i) {
+    if (isvec) {
+        if (i == -1) {
+            w.String(reinterpret_cast<char*>(kC(x)), x->n);
+        } else {
+            emit_char(w, kC(x)[i]);
+        }
+    } else {
+        emit_char(w, x->g);
     }
 }
 
 template<typename Writer>
-void serialise_char(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i == -1)
-        {
-            w.String((char*)kC(x), x->n);
-        }
-        else
-        {
-            w.String((char*)&kC(x)[i], 1);
-        }
-    }
-    else
-    {
-        w.String((char*)&x->g, 1);
-    }
+void emit_bool(Writer& w, G g) {
+    w.Bool(g != 0);
 }
 
 template<typename Writer>
-void serialise_bool(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            w.Bool(kG(x)[i] != 0);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                w.Bool(kG(x)[idx] != 0);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        w.Bool(x->g != 0);
-    }
+void serialise_bool(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, G g) {
+        emit_bool(w, g);
+    };
+    serialise_vector<Writer, G>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_byte(Writer& w, unsigned char n)
-{
+void emit_byte(Writer& w, G n) {
     const char* hex = "0123456789abcdef";
-    char buff[3]; // Two hex digits + null terminator
-
-    buff[0] = hex[(n >> 4) & 0xF];
-    buff[1] = hex[n & 0xF];
-    buff[2] = '\0';
-
+    char buff[3] = {hex[(n >> 4) & 0xF], hex[n & 0xF], '\0'};
     w.String(buff, 2);
 }
 
 template<typename Writer>
-void serialise_byte(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_byte(w, kG(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_byte(w, kG(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_byte(w, x->g);
-    }
+void serialise_byte(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, G n) {
+        emit_byte(w, n);
+    };
+    serialise_vector<Writer, G>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_short(Writer& w, int n)
-{
-    switch (n)
-    {
+void emit_short(Writer& w, H n) {
+    switch (n) {
         case wh:
         case nh:
             w.Null();
@@ -227,35 +230,16 @@ inline void emit_short(Writer& w, int n)
 }
 
 template<typename Writer>
-void serialise_short(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_short(w, kH(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_short(w, kH(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_short(w, x->h);
-    }
+void serialise_short(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, H n) {
+        emit_short(w, n);
+    };
+    serialise_vector<Writer, H>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_int(Writer& w, int n)
-{
-    switch (n)
-    {
+void emit_int(Writer& w, I n) {
+    switch (n) {
         case wi:
         case ni:
             w.Null();
@@ -267,35 +251,16 @@ inline void emit_int(Writer& w, int n)
 }
 
 template<typename Writer>
-void serialise_int(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_int(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_int(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_int(w, x->i);
-    }
+void serialise_int(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_int(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_long(Writer& w, long long n)
-{
-    switch (n)
-    {
+void emit_long(Writer& w, J n) {
+    switch (n) {
         case wj:
         case nj:
             w.Null();
@@ -307,339 +272,163 @@ inline void emit_long(Writer& w, long long n)
 }
 
 template<typename Writer>
-void serialise_long(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_long(w, kJ(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_long(w, kJ(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_long(w, x->j);
-    }
+void serialise_long(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, J n) {
+        emit_long(w, n);
+    };
+    serialise_vector<Writer, J>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_double(Writer& w, double n)
-{
-
+void emit_double(Writer& w, F n) {
     static const char* INF_STR = "Inf";
     static const char* NINF_STR = "-Inf";
 
-    if (std::isnan(n))
-    {
+    if (std::isnan(n)) {
         w.Null();
-    }
-    else if (std::isinf(n))
-    {
+    } else if (std::isinf(n)) {
         w.String(n == INFINITY ? INF_STR : NINF_STR);
-    }
-    else
-    {
+    } else {
         double intpart;
-        if (std::modf(n, &intpart) == 0.0)
-        {
-            // Value is an integer
-            if (n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max())
-            {
+        if (std::modf(n, &intpart) == 0.0) {
+            if (n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max()) {
                 w.Int(static_cast<int>(n));
-            }
-            else if (n >= std::numeric_limits<int64_t>::min() && n <= std::numeric_limits<int64_t>::max())
-            {
+            } else if (n >= std::numeric_limits<int64_t>::min() && n <= std::numeric_limits<int64_t>::max()) {
                 w.Int64(static_cast<int64_t>(n));
-            }
-            else
-            {
+            } else {
                 w.Double(n);
             }
-        }
-        else
-        {
+        } else {
             w.Double(n);
         }
     }
 }
 
 template<typename Writer>
-void serialise_float(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_double(w, kE(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_double(w, kE(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_double(w, x->e);
-    }
+void serialise_float(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, E n) {
+        emit_double(w, n);
+    };
+    serialise_vector<Writer, E>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-void serialise_double(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_double(w, kF(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_double(w, kF(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_double(w, x->f);
-    }
+void serialise_double(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, F n) {
+        emit_double(w, n);
+    };
+    serialise_vector<Writer, F>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_date_custom(Writer& w, int n)
-{
-    if (n == ni) // Handle missing values
-    {
+void emit_date_custom(Writer& w, I n) {
+    if (n == ni) {
         w.Null();
-    }
-    else
-    {
-        // Convert `n` to time since epoch and populate `tm` structure
-        time_t tt = (n + 10957) * 86400; // Adjusting the value for KDB+/Q date format
+    } else {
+        time_t tt = (n + 10957) * 86400;
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
-
-        // Buffer large enough for the formatted date (YYYY-MM-DD) and null terminator
-        char buff[12]; // YYYY-MM-DD + \0 -> 11 characters, using 12 for extra safety
-
-        // Use snprintf to safely format the date, ensuring no buffer overflow
+        char buff[11];
         int written = snprintf(buff, sizeof(buff), "%04d-%02d-%02d",
                                timinfo.tm_year + 1900,
                                timinfo.tm_mon + 1,
                                timinfo.tm_mday);
-
-        // Ensure no truncation occurred and the output is valid
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the formatted date string
-        }
-        else
-        {
-            w.Null(); // Handle error case if formatting failed
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_date(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_date_custom(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_date_custom(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_date_custom(w, x->i);
-    }
+void serialise_date(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_date_custom(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_time_custom(Writer& w, int n)
-{
-    if (n == ni) // Handle missing values
-    {
+void emit_time_custom(Writer& w, I n) {
+    if (n == ni) {
         w.Null();
-    }
-    else
-    {
-        // Calculate hours, minutes, seconds, and milliseconds
+    } else {
         int millis = n % 1000;
         int total_seconds = n / 1000;
         int hours = total_seconds / 3600;
         int minutes = (total_seconds % 3600) / 60;
         int seconds = total_seconds % 60;
-
-        // Use a buffer large enough for the formatted time string
-        char buff[16]; // HH:MM:SS.mmm\0 (total 12 characters + null terminator)
-
-        // Safely format the time string with snprintf
+        char buff[13];
         int written = snprintf(buff, sizeof(buff), "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis);
-
-        // Check if snprintf succeeded without truncation
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the correctly formatted time string
-        }
-        else
-        {
-            w.Null(); // Handle error in case of truncation or formatting failure
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_time(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_time_custom(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_time_custom(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_time_custom(w, x->i);
-    }
+void serialise_time(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_time_custom(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_timestamp_custom(Writer& w, long long n)
-{
-    if (n == nj) // Handle missing values
-    {
+void emit_timestamp_custom(Writer& w, J n) {
+    if (n == nj) {
         w.Null();
-    }
-    else
-    {
-        // Constants for conversion
+    } else {
         constexpr long long SEC_IN_DAY = 86400LL;
         constexpr long long NANOS_IN_SEC = 1000000000LL;
         constexpr long long DAYS_1970_TO_2000 = 10957LL;
 
-        // Calculate seconds and nanoseconds
         long long total_seconds = n / NANOS_IN_SEC;
         long long nanoseconds = n % NANOS_IN_SEC;
 
-        // Adjust for the epoch difference (from 2000-01-01 to 1970-01-01)
         total_seconds += DAYS_1970_TO_2000 * SEC_IN_DAY;
 
-        // Convert to time structure
         time_t tt = static_cast<time_t>(total_seconds);
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
 
-        // Buffer large enough for the full timestamp string
-        char buff[40]; // YYYY-MM-DDTHH:MM:SS.nnnnnnnnn (29 characters + null terminator)
-
-        // Safely format the timestamp string
+        char buff[30];
         int written = snprintf(buff, sizeof(buff), "%04d-%02d-%02dT%02d:%02d:%02d.%09lld",
                                timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
                                timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, nanoseconds);
-
-        // Check for truncation and emit the formatted string
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the formatted timestamp
-        }
-        else
-        {
-            w.Null(); // Handle error in case of truncation or formatting failure
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_timestamp(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_timestamp_custom(w, kJ(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_timestamp_custom(w, kJ(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_timestamp_custom(w, x->j);
-    }
+void serialise_timestamp(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, J n) {
+        emit_timestamp_custom(w, n);
+    };
+    serialise_vector<Writer, J>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_timespan_custom(Writer& w, long long n)
-{
-    if (n == nj)
-    {
+void emit_timespan_custom(Writer& w, J n) {
+    if (n == nj) {
         w.Null();
-    }
-    else
-    {
-        // Convert nanoseconds to days, hours, minutes, seconds, and nanoseconds
+    } else {
         constexpr long long NANOS_IN_SEC = 1000000000LL;
         constexpr long long SECS_IN_MIN = 60LL;
         constexpr long long MINS_IN_HOUR = 60LL;
         constexpr long long HOURS_IN_DAY = 24LL;
 
-        long long total_seconds = n / NANOS_IN_SEC;
-        long long nanoseconds = n % NANOS_IN_SEC;
+        bool is_negative = n < 0;
+        long long total_seconds = std::abs(n) / NANOS_IN_SEC;
+        long long nanoseconds = std::abs(n) % NANOS_IN_SEC;
 
-        // Determine sign of the timespan
-        bool is_negative = false;
-        if (n < 0)
-        {
-            is_negative = true;
-            total_seconds = -total_seconds;
-            nanoseconds = -nanoseconds;
-        }
-
-        // Calculate days, hours, minutes, and seconds
         long long days = total_seconds / (HOURS_IN_DAY * MINS_IN_HOUR * SECS_IN_MIN);
         long long remaining_seconds = total_seconds % (HOURS_IN_DAY * MINS_IN_HOUR * SECS_IN_MIN);
         long long hours = remaining_seconds / (MINS_IN_HOUR * SECS_IN_MIN);
@@ -647,272 +436,135 @@ inline void emit_timespan_custom(Writer& w, long long n)
         long long minutes = remaining_seconds / SECS_IN_MIN;
         long long seconds = remaining_seconds % SECS_IN_MIN;
 
-        // Format the string as "0D01:02:03.456789123"
-        char buff[32]; // Enough space for the string representation
-        snprintf(buff, sizeof(buff),
-                 "%s%lldD%02lld:%02lld:%02lld.%09lld",
-                 is_negative ? "-" : "", days, hours, minutes, seconds, nanoseconds);
-
-        // Write to the writer
-        w.String(buff, strlen(buff));
+        char buff[32];
+        int written = snprintf(buff, sizeof(buff),
+                               "%s%lldD%02lld:%02lld:%02lld.%09lld",
+                               is_negative ? "-" : "", days, hours, minutes, seconds, nanoseconds);
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
+        }
     }
 }
 
 template<typename Writer>
-void serialise_timespan(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_timespan_custom(w, kJ(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_timespan_custom(w, kJ(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_timespan_custom(w, x->j);
-    }
+void serialise_timespan(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, J n) {
+        emit_timespan_custom(w, n);
+    };
+    serialise_vector<Writer, J>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_datetime_custom(Writer& w, double n)
-{
-    if (std::isnan(n)) // Handle NaN (missing value)
-    {
+void emit_datetime_custom(Writer& w, F n) {
+    if (std::isnan(n)) {
         w.Null();
-    }
-    else
-    {
-        // Convert days since 2000-01-01 to seconds since UNIX epoch
+    } else {
         time_t tt = static_cast<time_t>((n + 10957) * 86400);
         struct tm timinfo;
         gmtime_r(&tt, &timinfo);
 
-        // Calculate and round milliseconds
         long millis = static_cast<long>(round((n - floor(n)) * 86400000)) % 1000;
 
-        // Buffer large enough for full datetime string
-        char buff[30]; // YYYY-MM-DDTHH:MM:SS.mmm (23 characters + null terminator)
-
-        // Format the datetime string safely
+        char buff[25];
         int written = snprintf(buff, sizeof(buff),
                                "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
                                timinfo.tm_year + 1900, timinfo.tm_mon + 1, timinfo.tm_mday,
                                timinfo.tm_hour, timinfo.tm_min, timinfo.tm_sec, millis);
-
-        // Check for truncation and emit the string
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the correctly formatted datetime
-        }
-        else
-        {
-            w.Null(); // Handle error if truncation or formatting failed
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_datetime(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_datetime_custom(w, kF(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_datetime_custom(w, kF(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_datetime_custom(w, x->f);
-    }
+void serialise_datetime(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, F n) {
+        emit_datetime_custom(w, n);
+    };
+    serialise_vector<Writer, F>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_month_custom(Writer& w, const int n)
-{
-    if (n == ni) // Handle missing value
-    {
+void emit_month_custom(Writer& w, I n) {
+    if (n == ni) {
         w.Null();
-    }
-    else
-    {
-        // Calculate year and month
+    } else {
         int year = n / 12 + 2000;
         int month = n % 12 + 1;
 
-        // Buffer large enough for YYYY-MM format
-        char buff[8]; // YYYY-MM (7 characters + null terminator)
-
-        // Safely format the month string
+        char buff[8];
         int written = snprintf(buff, sizeof(buff), "%04d-%02d", year, month);
-
-        // Check for truncation and emit the string
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the formatted year-month string
-        }
-        else
-        {
-            w.Null(); // Handle error if truncation or formatting failed
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_month(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_month_custom(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_month_custom(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_month_custom(w, x->i);
-    }
+void serialise_month(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_month_custom(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_minute_custom(Writer& w, const int n)
-{
-    if (n == ni) // Handle missing value
-    {
+void emit_minute_custom(Writer& w, I n) {
+    if (n == ni) {
         w.Null();
-    }
-    else
-    {
-        // Calculate hours and minutes
+    } else {
         int hours = n / 60;
         int minutes = n % 60;
 
-        // Buffer large enough for HH:MM format
-        char buff[6]; // HH:MM (5 characters + null terminator)
-
-        // Safely format the time string
+        char buff[6];
         int written = snprintf(buff, sizeof(buff), "%02d:%02d", hours, minutes);
-
-        // Check for truncation and emit the string
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the formatted time string
-        }
-        else
-        {
-            w.Null(); // Handle error if truncation or formatting failed
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_minute(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_minute_custom(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_minute_custom(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_minute_custom(w, x->i);
-    }
+void serialise_minute(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_minute_custom(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
-inline void emit_second_custom(Writer& w, const int n)
-{
-    if (n == ni) // Handle missing value
-    {
+void emit_second_custom(Writer& w, I n) {
+    if (n == ni) {
         w.Null();
-    }
-    else
-    {
-        // Calculate hours, minutes, and seconds
+    } else {
         int hours = n / 3600;
         int minutes = (n % 3600) / 60;
         int seconds = n % 60;
 
-        // Buffer large enough for HH:MM:SS format
-        char buff[9]; // HH:MM:SS (8 characters + null terminator)
-
-        // Safely format the time string
+        char buff[9];
         int written = snprintf(buff, sizeof(buff), "%02d:%02d:%02d", hours, minutes, seconds);
-
-        // Check for truncation and emit the string
-        if (written > 0 && written < sizeof(buff))
-        {
-            w.String(buff, written); // Emit the formatted time string
-        }
-        else
-        {
-            w.Null(); // Handle error if truncation or formatting failed
+        if (written > 0 && written < static_cast<int>(sizeof(buff))) {
+            w.String(buff, written);
+        } else {
+            w.Null();
         }
     }
 }
 
 template<typename Writer>
-void serialise_second(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_second_custom(w, kI(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_second_custom(w, kI(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_second_custom(w, x->i);
-    }
+void serialise_second(Writer& w, K x, bool isvec, int i) {
+    auto emit_func = [](Writer& w, I n) {
+        emit_second_custom(w, n);
+    };
+    serialise_vector<Writer, I>(w, x, isvec, i, emit_func);
 }
 
 template<typename Writer>
@@ -950,43 +602,22 @@ inline void emit_guid_custom(Writer& w, const U guid_raw)
 template<typename Writer>
 void serialise_guid(Writer& w, K x, bool isvec, int i)
 {
-    if (isvec)
-    {
-        if (i >= 0)
-        {
-            emit_guid_custom(w, kU(x)[i]);
-        }
-        else
-        {
-            w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
-                emit_guid_custom(w, kU(x)[idx]);
-            }
-            w.EndArray();
-        }
-    }
-    else
-    {
-        emit_guid_custom(w, kU(x)[0]);
-    }
+    auto emit_func = [](Writer& w, U u) {
+        emit_guid_custom(w, u);
+    };
+    serialise_vector(w, x, isvec, i, emit_func, (U*)nullptr);
 }
 
 template<typename Writer>
-void serialise_dict(Writer& w, K x, bool isvec, int i)
-{
+void serialise_dict(Writer& w, K x, bool /*isvec*/, int /*i*/) {
     const K keys = kK(x)[0];
     const K values = kK(x)[1];
 
-    if (keys->t == XT && values->t == XT)
-    {
+    if (keys->t == XT && values->t == XT) {
         serialise_keyed_table(w, keys, values);
-    }
-    else
-    {
+    } else {
         w.StartObject();
-        for (int idx = 0; idx < keys->n; idx++)
-        {
+        for (int idx = 0; idx < keys->n; ++idx) {
             serialise_atom(w, keys, idx);
             serialise_atom(w, values, idx);
         }
@@ -995,59 +626,44 @@ void serialise_dict(Writer& w, K x, bool isvec, int i)
 }
 
 template<typename Writer>
-void serialise_list(Writer& w, K x, bool isvec, int i)
-{
-    if (isvec)
-    {
-        if (i >= 0)
-        {
+void serialise_list(Writer& w, K x, bool isvec, int i) {
+    if (isvec) {
+        if (i >= 0) {
             K v = kK(x)[i];
-            serialise_atom(w, v);
-        }
-        else
-        {
+            serialise_atom(w, v, -1);
+        } else {
             w.StartArray();
-            for (int idx = 0; idx < x->n; idx++)
-            {
+            for (int idx = 0; idx < x->n; ++idx) {
                 K v = kK(x)[idx];
-                serialise_atom(w, v);
+                serialise_atom(w, v, -1);
             }
             w.EndArray();
         }
-    }
-    else
-    {
+    } else {
         w.Null();
     }
 }
 
 template<typename Writer>
-void serialise_table(Writer& w, K x, bool isvec, int i)
-{
+void serialise_table(Writer& w, K x, bool isvec, int i) {
     const K dict = x->k;
     const K keys = kK(dict)[0];
     const K values = kK(dict)[1];
 
-    if (i >= 0)
-    {
+    if (i >= 0) {
         w.StartObject();
-        for (int col = 0; col < keys->n; col++)
-        {
+        for (int col = 0; col < keys->n; ++col) {
             serialise_atom(w, keys, col);
             serialise_atom(w, kK(values)[col], i);
         }
         w.EndObject();
-    }
-    else
-    {
+    } else {
         const int rows = kK(values)[0]->n;
 
         w.StartArray();
-        for (int row = 0; row < rows; row++)
-        {
+        for (int row = 0; row < rows; ++row) {
             w.StartObject();
-            for (int col = 0; col < keys->n; col++)
-            {
+            for (int col = 0; col < keys->n; ++col) {
                 serialise_atom(w, keys, col);
                 serialise_atom(w, kK(values)[col], row);
             }
@@ -1057,154 +673,147 @@ void serialise_table(Writer& w, K x, bool isvec, int i)
     }
 }
 
-// Template function to serialize K objects (atoms, lists, dictionaries, etc.)
 template<typename Writer>
-void serialise_atom(Writer& w, const K x, int i)
-{
+void serialise_atom(Writer& w, const K x, int i) {
     bool isvec = x->t >= 0;
 
-    switch (x->t)
-    {
+    switch (x->t) {
         case 0:
             serialise_list(w, x, isvec, i);
             break;
-        case KS:
         case -KS:
+        case KS:
             serialise_sym(w, x, isvec, i);
             break;
-        case KC:
         case -KC:
+        case KC:
             serialise_char(w, x, isvec, i);
             break;
-        case KB:
         case -KB:
+        case KB:
             serialise_bool(w, x, isvec, i);
             break;
-        case KG:
         case -KG:
+        case KG:
             serialise_byte(w, x, isvec, i);
             break;
-        case KH:
         case -KH:
+        case KH:
             serialise_short(w, x, isvec, i);
             break;
-        case KI:
         case -KI:
+        case KI:
             serialise_int(w, x, isvec, i);
             break;
-        case KT:
-        case -KT:
-            serialise_time(w, x, isvec, i);
-            break;
-        case KN:
-        case -KN:
-            serialise_timespan(w, x, isvec, i);
-            break;
-        case KP:
-        case -KP:
-            serialise_timestamp(w, x, isvec, i);
-            break;
-        case KZ:
-        case -KZ:
-            serialise_datetime(w, x, isvec, i);
-            break;
-        case KD:
-        case -KD:
-            serialise_date(w, x, isvec, i);
-            break;
-        case KJ:
         case -KJ:
+        case KJ:
             serialise_long(w, x, isvec, i);
             break;
-        case UU:
-        case -UU:
-            serialise_guid(w, x, isvec, i);
-            break;
-        case KE:
         case -KE:
+        case KE:
             serialise_float(w, x, isvec, i);
             break;
-        case KM:
-        case -KM:
-            serialise_month(w, x, isvec, i);
-            break;
-        case KF:
         case -KF:
+        case KF:
             serialise_double(w, x, isvec, i);
             break;
-        case KU:
+        case -KD:
+        case KD:
+            serialise_date(w, x, isvec, i);
+            break;
+        case -KZ:
+        case KZ:
+            serialise_datetime(w, x, isvec, i);
+            break;
+        case -KP:
+        case KP:
+            serialise_timestamp(w, x, isvec, i);
+            break;
+        case -KN:
+        case KN:
+            serialise_timespan(w, x, isvec, i);
+            break;
+        case -KM:
+        case KM:
+            serialise_month(w, x, isvec, i);
+            break;
         case -KU:
-            serialise_minute(w, x, isvec, i); 
-	        break;
-        case KV:
+        case KU:
+            serialise_minute(w, x, isvec, i);
+            break;
         case -KV:
-            serialise_second(w, x, isvec, i); 
-	        break;
-	    case XT:
+        case KV:
+            serialise_second(w, x, isvec, i);
+            break;
+        case -KT:
+        case KT:
+            serialise_time(w, x, isvec, i);
+            break;
+        case -UU:
+        case UU:
+            serialise_guid(w, x, isvec, i);
+            break;
+        case XT:
             serialise_table(w, x, isvec, i);
             break;
         case XD:
             serialise_dict(w, x, isvec, i);
             break;
         case 20:
-        case -20:
-            serialise_enum_sym(w, x, isvec, i); 
-	        break;
-	default:
+	case -20:
+            serialise_enum_sym(w, x, isvec, i);
+            break;
+        default:
             w.Null();
             break;
     }
 }
 
-
-} // namespace kjson
+}  // namespace kjson
 
 extern "C" {
 
-// Helper function to handle parsing errors
 K handle_parse_error(const rapidjson::Document& document) {
     std::string errMsg = std::string("Parse error: ") + GetParseError_En(document.GetParseError()) +
                          " at offset " + std::to_string(document.GetErrorOffset());
-    return krr((S)errMsg.c_str());
+    return krr(const_cast<S>(errMsg.c_str()));
 }
 
-// KDB+ interface function: JSON to K (General)
 K jtok(K json_string) {
     if (json_string->t != KC) {
-        return krr((S)"Type error: Input must be a char vector (string)");
+        return krr(const_cast<S>("Type error: Input must be a char vector (string)"));
     }
 
-    // Parse the JSON string
     rapidjson::Document document;
-    document.Parse((const char*)kC(json_string), json_string->n);
+    document.Parse(reinterpret_cast<const char*>(kC(json_string)), json_string->n);
 
     if (document.HasParseError()) {
         return handle_parse_error(document);
     }
 
-    // Convert JSON value to K object
-    return kjson::json_to_kobject(document);
+    try {
+        return kjson::json_to_kobject(document);
+    } catch (const std::exception& e) {
+        return krr(const_cast<S>(e.what()));
+    }
 }
 
-// KDB+ interface function: K object to JSON
-K ktoj(K x)
-{
-    // Use RapidJSON's StringBuffer and Writer for serialization
+K ktoj(K x) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
 
-    // Set decimal precision to 5 places (optional)
     writer.SetMaxDecimalPlaces(5);
 
-    // Serialize the K object
-    kjson::serialise_atom(writer, x);  // Assuming serialise_atom exists in the kjson namespace
+    try {
+        kjson::serialise_atom(writer, x, -1);
 
-    // Get the size of the buffer
-    size_t len = buffer.GetSize();
-    const char* str = buffer.GetString();
+        size_t len = buffer.GetSize();
+        const char* str = buffer.GetString();
 
-    // Marshal to KDB+, passing both the string and its length for safety
-    return kpn((S)str, len);  // Use kpn to ensure proper string length is handled
+        return kpn(const_cast<S>(str), len);
+    } catch (const std::exception& e) {
+        return krr(const_cast<S>(e.what()));
+    }
 }
 
-} // extern "C"
+}  // extern "C"
